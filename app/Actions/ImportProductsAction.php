@@ -10,8 +10,10 @@ use App\Contracts\SerializerInterface;
 use App\Contracts\ValidatorInterface;
 use App\DataTransferObjects\ImportStatistics;
 use App\Models\Product;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Sleep;
 
 final class ImportProductsAction
 {
@@ -39,7 +41,10 @@ final class ImportProductsAction
 
         $currentPage = $startPage;
         $lastPage = null;
+        $retries = 0;
+        $maxRetries = (int) config('import.retry.max_attempts', 3);
 
+        // lastPage ilk başarılı yanıta kadar null; null karşılaştırması ilk sayfa hatasında döngüyü sessizce bitiriyordu
         do {
             $this->rateLimiter->throttle();
 
@@ -53,20 +58,24 @@ final class ImportProductsAction
                 $this->checkpointManager->save($currentPage + 1);
 
                 $currentPage++;
+                $retries = 0;
             } catch (\Throwable $e) {
-                if ($this->isRecoverableError($e)) {
+                if ($retries < $maxRetries && $this->isRecoverableError($e)) {
+                    $retries++;
+
                     Log::warning('Recoverable error during import', [
                         'page' => $currentPage,
                         'error' => $e->getMessage(),
+                        'retry' => $retries,
                     ]);
-                    sleep(5);
+                    Sleep::for(5)->seconds();
 
                     continue;
                 }
 
                 throw $e;
             }
-        } while ($currentPage <= $lastPage);
+        } while ($lastPage === null || $currentPage <= $lastPage);
 
         return $stats;
     }
@@ -141,6 +150,12 @@ final class ImportProductsAction
      */
     private function isRecoverableError(\Throwable $exception): bool
     {
+        // QueryException iletisi her zaman "Connection" içerir; kalıcı SQLSTATE 22 ve 23 hataları geçici sayılmaz
+        if ($exception instanceof QueryException
+            && in_array(substr((string) $exception->getCode(), 0, 2), ['22', '23'], true)) {
+            return false;
+        }
+
         $message = strtolower($exception->getMessage());
         $recoverablePatterns = config('import.recoverable_errors', []);
 
