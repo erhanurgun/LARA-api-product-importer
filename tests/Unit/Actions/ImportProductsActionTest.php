@@ -258,3 +258,53 @@ it('completes the import after one transient error', function () {
     expect($stats->totalProcessed)->toBe(0);
     Sleep::assertSleptTimes(1);
 });
+
+it('counts a retried page only once', function () {
+    Sleep::fake();
+    config(['import.retry.max_attempts' => 3]);
+
+    $apiClient = mock(ApiClientInterface::class);
+    $apiClient->shouldReceive('fetchProducts')
+        ->twice()
+        ->with(1)
+        ->andReturn(new ApiResponse(data: [['id' => 'uuid1']], currentPage: 1, lastPage: 1, total: 1));
+
+    $checkpointManager = mock(CheckpointManagerInterface::class);
+    $checkpointManager->shouldReceive('save')
+        ->twice()
+        ->with(2)
+        ->andReturnUsing(
+            fn () => throw new RuntimeException('Connection reset'),
+            fn () => null
+        );
+
+    $stats = makeRetryAction($apiClient, $checkpointManager)->execute(startPage: 1);
+
+    expect($stats->failedValidations)->toBe(1)
+        ->and($stats->totalProcessed)->toBe(1);
+});
+
+it('retries a failed page even when its response reports a lower last page', function () {
+    Sleep::fake();
+    config(['import.retry.max_attempts' => 3]);
+
+    $apiClient = mock(ApiClientInterface::class);
+    $apiClient->shouldReceive('fetchProducts')
+        ->twice()
+        ->with(5)
+        ->andReturn(new ApiResponse(data: [['id' => 'uuid1']], currentPage: 5, lastPage: 3, total: 1));
+
+    $checkpointManager = mock(CheckpointManagerInterface::class);
+    $checkpointManager->shouldReceive('save')
+        ->twice()
+        ->with(6)
+        ->andReturnUsing(
+            fn () => throw new RuntimeException('Connection reset'),
+            fn () => null
+        );
+
+    $stats = makeRetryAction($apiClient, $checkpointManager)->execute(startPage: 5);
+
+    expect($stats->failedValidations)->toBe(1);
+    Sleep::assertSleptTimes(1);
+});

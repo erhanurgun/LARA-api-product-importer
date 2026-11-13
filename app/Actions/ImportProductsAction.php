@@ -52,10 +52,14 @@ final class ImportProductsAction
                 $response = $this->apiClient->fetchProducts($currentPage);
                 $this->rateLimiter->hit();
 
-                $lastPage = $response->lastPage;
-
-                $this->processPage($response->data, $stats, $dryRun);
+                [$succeeded, $failed] = $this->processPage($response->data, $dryRun);
                 $this->checkpointManager->save($currentPage + 1);
+
+                // Sayımlar sayfa tamamlanınca: kayıt ya da checkpoint yeniden denenirse sayfa iki kez sayılmasın
+                $this->recordPageStats($stats, $succeeded, $failed);
+
+                // Hata alan sayfanın lastPage değeri yeniden denemeden önce döngüyü sessizce bitirmesin
+                $lastPage = $response->lastPage;
 
                 $currentPage++;
                 $retries = 0;
@@ -84,10 +88,12 @@ final class ImportProductsAction
      * Process a single page of products.
      *
      * @param  array<array<string, mixed>>  $products
+     * @return array{int, int} geçerli ve geçersiz ürün sayısı
      */
-    private function processPage(array $products, ImportStatistics $stats, bool $dryRun): void
+    private function processPage(array $products, bool $dryRun): array
     {
         $validProducts = [];
+        $failed = 0;
 
         foreach ($products as $apiProduct) {
             $mappedData = $this->dataMapper->mapToDatabaseFormat($apiProduct);
@@ -95,14 +101,25 @@ final class ImportProductsAction
 
             if ($result['valid']) {
                 $validProducts[] = $result['data'];
-                $stats->incrementSuccess();
             } else {
-                $stats->incrementFailed();
+                $failed++;
             }
         }
 
         if (! $dryRun && count($validProducts) > 0) {
             $this->saveProducts($validProducts);
+        }
+
+        return [count($validProducts), $failed];
+    }
+
+    private function recordPageStats(ImportStatistics $stats, int $succeeded, int $failed): void
+    {
+        for ($i = 0; $i < $succeeded; $i++) {
+            $stats->incrementSuccess();
+        }
+        for ($i = 0; $i < $failed; $i++) {
+            $stats->incrementFailed();
         }
     }
 
